@@ -657,6 +657,12 @@ export default function CompressPage() {
           <Link href="/" className="rounded-full border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-300 transition hover:border-violet-500 hover:text-white">
             ← Timeline засварлагч
           </Link>
+          <Link href="/merge" className="rounded-full border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-300 transition hover:border-violet-500 hover:text-white">
+            Хэсэг нийлүүлэх
+          </Link>
+          <Link href="/convert" className="rounded-full border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-300 transition hover:border-violet-500 hover:text-white">
+            Олноор хөрвүүлэх
+          </Link>
           <div className="flex items-center gap-2 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1.5 text-xs font-medium text-emerald-300">
             <HardDrive className="h-3.5 w-3.5" /> 100% офлайн
           </div>

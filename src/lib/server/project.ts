@@ -6,11 +6,13 @@ import {
   clampCrop,
   isCanvasAspect,
   type Clip,
+  type ClipFrame,
   type MediaClip,
   type Project,
   type TextClip,
   type Track,
 } from "@/lib/timeline";
+import { TRANSITION_TYPES, type Transition } from "@/lib/transitions";
 
 // ---------------------------------------------------------------------------
 // Validation — the project comes from the browser, so every value is re-checked.
@@ -99,6 +101,19 @@ export function sanitizeProject(raw: unknown): Project | string {
         opacity: num(m.opacity, 0, 1, 1),
         crop: clampCrop({ l: num(crop.l, 0, 1, 0), r: num(crop.r, 0, 1, 0), t: num(crop.t, 0, 1, 0), b: num(crop.b, 0, 1, 0) }),
       };
+      const fr = m.frame as Partial<ClipFrame> | undefined;
+      if (c.type === "video" && fr && typeof fr === "object") {
+        clip.frame = {
+          color: color(fr.color, "#000000"),
+          opacity: num(fr.opacity, 0, 1, 0.6),
+          padding: num(fr.padding, 0, 1, 0.15),
+          radius: num(fr.radius, 0, 0.5, 0.2),
+        };
+      }
+      const tr = m.transition as Partial<Transition> | undefined;
+      if (c.type === "video" && tr && TRANSITION_TYPES.includes(tr.type as Transition["type"])) {
+        clip.transition = { type: tr.type as Transition["type"], duration: num(tr.duration, 0.1, 4, 0.5) };
+      }
       clips.push(clip);
     }
   }

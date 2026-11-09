@@ -13,6 +13,7 @@ import {
   type TrackKind,
   visualSize,
 } from "@/lib/timeline";
+import type { Transition } from "@/lib/transitions";
 import { mediaDuration, type MediaItem } from "./media";
 
 const EPS = 1e-3;
@@ -90,6 +91,49 @@ function insertIndex(tracks: Track[], kind: TrackKind): number {
   if (firstVideo >= 0) return firstVideo;
   const firstAudio = tracks.findIndex((t) => t.kind === "audio");
   return firstAudio >= 0 ? firstAudio : tracks.length;
+}
+
+/**
+ * Moves a clip onto a brand-new track of its kind, at the top of that kind's group (drawn in front,
+ * for video) or at the bottom (drawn behind).
+ */
+export function moveToNewTrack(project: Project, clip: Clip, at: "top" | "bottom"): Project {
+  const kind = clip.type;
+  const track = newTrack(kind);
+  const tracks = [...project.tracks];
+  const same = tracks.flatMap((t, i) => (t.kind === kind ? [i] : []));
+  const index = !same.length ? insertIndex(tracks, kind) : at === "top" ? same[0] : same[same.length - 1] + 1;
+  tracks.splice(index, 0, track);
+  const clips = project.clips.map((c) => (c.id === clip.id ? { ...clip, trackId: track.id } : c));
+  return normalize({ ...project, tracks, clips });
+}
+
+export type TrackMove = "up" | "down" | "top" | "bottom";
+
+/** Where a track sits among the tracks of its kind (0 = top), and how many there are. */
+export function trackRank(project: Project, trackId: string): { index: number; count: number } {
+  const kind = project.tracks.find((t) => t.id === trackId)?.kind;
+  const same = project.tracks.filter((t) => t.kind === kind);
+  return { index: same.findIndex((t) => t.id === trackId), count: same.length };
+}
+
+/**
+ * Reorders a track among the tracks of its kind (video stays below text, audio at the bottom).
+ * For video tracks "up" means drawn in front of the others.
+ */
+export function moveTrack(project: Project, trackId: string, to: TrackMove): Project {
+  const { index, count } = trackRank(project, trackId);
+  if (index < 0) return project;
+  const target = to === "up" ? index - 1 : to === "down" ? index + 1 : to === "top" ? 0 : count - 1;
+  if (target < 0 || target >= count || target === index) return project;
+  const kind = project.tracks.find((t) => t.id === trackId)!.kind;
+  const slots = project.tracks.flatMap((t, i) => (t.kind === kind ? [i] : []));
+  const same = slots.map((i) => project.tracks[i]);
+  const [moved] = same.splice(index, 1);
+  same.splice(target, 0, moved);
+  const tracks = [...project.tracks];
+  slots.forEach((slot, k) => (tracks[slot] = same[k]));
+  return { ...project, tracks };
 }
 
 /** Drops empty tracks (keeping at least one video track) so the timeline stays tidy. */
@@ -184,10 +228,67 @@ export function splitClips(project: Project, ids: string[], t: number): { projec
       clips.push({ ...c, duration: offset }, { ...c, id: rightId, start: t, duration: c.duration - offset });
     } else {
       const cut = c.in + offset * c.speed;
-      clips.push({ ...c, out: cut, fadeOut: 0 }, { ...c, id: rightId, start: t, in: cut, fadeIn: 0 });
+      clips.push({ ...c, out: cut, fadeOut: 0 }, { ...c, id: rightId, start: t, in: cut, fadeIn: 0, transition: undefined });
     }
   }
   return { project: { ...project, clips }, created };
+}
+
+// Clips nudged by hand (no snapping) can sit a hair apart and still count as touching.
+const JOIN_TOL = 0.02;
+
+/**
+ * `b` continues `a` seamlessly: same track, back to back, and the same recording picking up where
+ * `a` stops (what a split leaves behind). Joining them can't change what plays.
+ */
+export function canJoin(a: Clip, b: Clip): boolean {
+  if (a.id === b.id || a.trackId !== b.trackId || Math.abs(clipEnd(a) - b.start) > JOIN_TOL) return false;
+  if (a.type === "text" || b.type === "text") return a.type === "text" && b.type === "text" && a.text === b.text;
+  return (
+    a.type === b.type &&
+    a.mediaId === b.mediaId &&
+    Math.abs(a.speed - b.speed) < EPS &&
+    a.audioDetached === b.audioDetached &&
+    Math.abs(b.in - a.out) < JOIN_TOL * a.speed
+  );
+}
+
+/**
+ * Undoes splits: every run of back-to-back pieces in `ids` that `canJoin` becomes one clip. The
+ * left piece's settings win; the fade-out comes from the right piece.
+ */
+function joinPair(a: Clip, b: Clip): Clip {
+  if (a.type === "text") return { ...a, duration: clipEnd(b) - a.start };
+  const right = b as MediaClip;
+  return { ...a, out: right.out, fadeOut: right.fadeOut };
+}
+
+export function joinClips(project: Project, ids: string[]): { project: Project; joined: string[] } {
+  const idSet = new Set(ids);
+  const removed = new Set<string>();
+  const merged = new Map<string, Clip>();
+  for (const track of project.tracks) {
+    const pieces = project.clips.filter((c) => c.trackId === track.id && idSet.has(c.id)).sort((a, b) => a.start - b.start);
+    let cur: Clip | null = null;
+    for (const c of pieces) {
+      if (cur && canJoin(cur, c)) {
+        cur = joinPair(cur, c);
+        removed.add(c.id);
+        merged.set(cur.id, cur);
+      } else {
+        cur = c;
+      }
+    }
+  }
+  if (!merged.size) return { project, joined: [] };
+  const clips = project.clips.filter((c) => !removed.has(c.id)).map((c) => merged.get(c.id) ?? c);
+  return { project: { ...project, clips }, joined: [...merged.keys()] };
+}
+
+/** Sets (or with `undefined` removes) the transition into each of these video clips. */
+export function setTransition(project: Project, intoIds: string[], transition: Transition | undefined): Project {
+  const ids = new Set(intoIds);
+  return { ...project, clips: project.clips.map((c) => (c.type === "video" && ids.has(c.id) ? { ...c, transition } : c)) };
 }
 
 export function deleteClips(project: Project, ids: string[], ripple = false): Project {

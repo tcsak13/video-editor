@@ -1,11 +1,22 @@
 "use client";
 
 import {
+  ArrowDown,
+  ArrowLeft,
+  ArrowRight,
+  ArrowUp,
+  Blend,
+  ChevronDown,
+  ChevronsLeft,
+  ChevronUp,
   Eye,
   EyeOff,
   Film,
   Lock,
+  Moon,
   Music,
+  Sparkles,
+  Sun,
   Trash2,
   Type,
   Unlink,
@@ -18,16 +29,32 @@ import {
   useMemo,
   useRef,
   useState,
+  type ComponentType,
   type DragEvent,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { MIN_CLIP, clipDuration, clipEnd, type Clip, type Project, type Track } from "@/lib/timeline";
 import { thumbsUrl, type MediaItem } from "./media";
-import { closeGap, editPoints, isFree, normalize, trackGaps, type Gap } from "./ops";
+import { createPortal } from "react-dom";
+import {
+  DEFAULT_TRANSITION,
+  TRANSITION_DURATIONS,
+  TRANSITION_LABELS,
+  TRANSITION_TYPES,
+  findCuts,
+  type Cut,
+  type Transition,
+  type TransitionType,
+} from "@/lib/transitions";
+import { closeGap, editPoints, isFree, moveToNewTrack, moveTrack, normalize, setTransition, trackGaps, trackRank, type Gap, type TrackMove } from "./ops";
 import { cx, rulerLabel, useClockTime, type Clock } from "./store";
 
 export const HEADER_W = 184;
+/** Zoom range in pixels per second: fully out shows ~8 hours across a screen, fully in shows frames. */
+export const MIN_PPS = 0.05;
+export const MAX_PPS = 400;
+export const clampPps = (pps: number) => Math.min(MAX_PPS, Math.max(MIN_PPS, pps));
 const RULER_H = 28;
 const LANE_H: Record<Track["kind"], number> = { video: 66, audio: 48, text: 34 };
 const SNAP_PX = 8;
@@ -60,7 +87,11 @@ type Drag = {
   moved: boolean;
 };
 
-type Ghost = { clips: Map<string, Clip>; invalid: boolean; snapAt: number | null };
+/** A single dragged clip can land on a new track above or below the tracks of its kind. */
+type NewTrackDrop = { at: "top" | "bottom"; y: number };
+type Ghost = { clips: Map<string, Clip>; invalid: boolean; snapAt: number | null; newTrack: NewTrackDrop | null };
+
+const NEW_TRACK = "__new-track__";
 
 export default function Timeline(props: Props) {
   const { project, media, clock, selected, setSelected, commit, pps, setPps, snapping } = props;
@@ -100,7 +131,7 @@ export default function Timeline(props: Props) {
   }, []);
 
   // Wheel: Ctrl/⌘ (and trackpad pinch, which arrives as ctrl+wheel) zooms around the pointer,
-  // Shift scrolls sideways, a plain wheel keeps its native behaviour.
+  // Shift scrolls sideways, and so does a plain wheel when there are no extra tracks to scroll down to.
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -112,12 +143,18 @@ export default function Timeline(props: Props) {
         el.scrollLeft += (Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY) * unit;
         return;
       }
-      if (!e.ctrlKey && !e.metaKey) return;
+      if (!e.ctrlKey && !e.metaKey) {
+        if (el.scrollHeight <= el.clientHeight && Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+          e.preventDefault();
+          el.scrollLeft += e.deltaY * unit;
+        }
+        return;
+      }
       e.preventDefault();
       const rect = el.getBoundingClientRect();
       const px = e.clientX - rect.left - HEADER_W;
       const t = (el.scrollLeft + px) / ppsRef.current;
-      const next = Math.min(400, Math.max(2, ppsRef.current * Math.exp(-e.deltaY * unit * 0.002)));
+      const next = clampPps(ppsRef.current * Math.exp(-e.deltaY * unit * 0.002));
       setPps(next);
       requestAnimationFrame(() => (el.scrollLeft = t * next - px));
     };
@@ -157,6 +194,19 @@ export default function Timeline(props: Props) {
     const el = scrollRef.current!;
     const y = clientY - el.getBoundingClientRect().top - RULER_H + el.scrollTop;
     return rows.find((r) => y >= r.top && y < r.top + r.height) ?? null;
+  };
+
+  /** Past the first/last track of `kind` (in y), a drop makes a new track there. */
+  const newTrackAt = (clientY: number, kind: Track["kind"]): NewTrackDrop | null => {
+    const group = rows.filter((r) => r.track.kind === kind);
+    if (!group.length) return null;
+    const el = scrollRef.current!;
+    const y = clientY - el.getBoundingClientRect().top - RULER_H + el.scrollTop;
+    const top = group[0].top;
+    const bottom = group[group.length - 1].top + group[group.length - 1].height;
+    if (y < top) return { at: "top", y: top };
+    if (y >= bottom) return { at: "bottom", y: bottom };
+    return null;
   };
 
   // --- clip drag (move / trim) ----------------------------------------------------
@@ -222,6 +272,7 @@ export default function Timeline(props: Props) {
     let dt = (e.clientX - d.x0) / scale;
     const clips = new Map<string, Clip>();
     let snapAt: number | null = null;
+    let newTrack: NewTrackDrop | null = null;
 
     if (d.mode === "move") {
       const minStart = Math.min(...[...d.orig.values()].map((c) => c.start));
@@ -237,8 +288,10 @@ export default function Timeline(props: Props) {
       }
       dt = Math.max(dt, -minStart);
       // Single clips can hop to another track of the same kind.
+      // Single clips can hop to another track of the same kind, or onto a new one past the edge.
       const row = d.ids.length === 1 ? rowAt(e.clientY) : null;
-      const targetTrack = row && row.track.kind === primary.type && !row.track.locked ? row.track.id : null;
+      newTrack = d.ids.length === 1 && !(row && row.track.kind === primary.type) ? newTrackAt(e.clientY, primary.type) : null;
+      const targetTrack = newTrack ? NEW_TRACK : row && row.track.kind === primary.type && !row.track.locked ? row.track.id : null;
       for (const c of d.orig.values()) {
         clips.set(c.id, { ...c, start: c.start + dt, trackId: targetTrack && c.id === d.primary ? targetTrack : c.trackId });
       }
@@ -277,7 +330,7 @@ export default function Timeline(props: Props) {
     }
 
     const invalid = [...clips.values()].some((c) => !isFree(p, c.trackId, c.start, clipEnd(c), exclude));
-    const g = { clips, invalid, snapAt };
+    const g = { clips, invalid, snapAt, newTrack };
     ghostRef.current = g;
     setGhost(g);
   }
@@ -289,6 +342,12 @@ export default function Timeline(props: Props) {
     ghostRef.current = null;
     setGhost(null);
     if (!d?.moved || !g || g.invalid) return;
+    const onNew = g.newTrack ? [...g.clips.values()].find((c) => c.trackId === NEW_TRACK) : undefined;
+    if (onNew && g.newTrack) {
+      const at = g.newTrack.at;
+      commit((p) => moveToNewTrack(p, onNew, at));
+      return;
+    }
     commit((p) => normalize({ ...p, clips: p.clips.map((c) => g.clips.get(c.id) ?? c) }));
   }
 
@@ -334,6 +393,21 @@ export default function Timeline(props: Props) {
   // --- track header actions ----------------------------------------------------------
   const patchTrack = (id: string, patch: Partial<Track>) =>
     commit((p) => ({ ...p, tracks: p.tracks.map((t) => (t.id === id ? { ...t, ...patch } : t)) }));
+  // --- transitions: a marker on every cut between two video clips opens the picker ----
+  const cuts = useMemo(() => findCuts(project.clips), [project.clips]);
+  const [picker, setPicker] = useState<{ intoId: string; x: number; y: number } | null>(null);
+  const pickerCut = picker ? cuts.find((c) => c.into.id === picker.intoId) : undefined;
+  const applyTransition = (cut: Cut, transition: Transition | undefined, everywhere = false) => {
+    commit((p) => {
+      const locked = new Set(p.tracks.filter((t) => t.locked).map((t) => t.id));
+      const ids = everywhere ? findCuts(p.clips).filter((c) => !locked.has(c.into.trackId)).map((c) => c.into.id) : [cut.into.id];
+      return setTransition(p, ids, transition);
+    });
+    // Park the playhead just before it, so Space plays the transition straight away.
+    if (transition) clock.seek(Math.max(0, cut.at - transition.duration / 2 - 0.6));
+  };
+
+  const reorderTrack = (id: string, to: TrackMove) => commit((p) => moveTrack(p, id, to));
   const deleteTrack = (id: string) =>
     commit((p) => normalize({ ...p, tracks: p.tracks.filter((t) => t.id !== id), clips: p.clips.filter((c) => c.trackId !== id) }));
 
@@ -403,12 +477,14 @@ export default function Timeline(props: Props) {
             <TrackHeader
               track={track}
               label={labels.get(track.id) ?? ""}
+              rank={trackRank(project, track.id)}
               onPatch={(patch) => patchTrack(track.id, patch)}
+              onMove={(to) => reorderTrack(track.id, to)}
               onDelete={() => deleteTrack(track.id)}
             />
             <div
               className={cx(
-                "relative flex-1 border-b border-zinc-800/70",
+                "group/lane relative flex-1 border-b border-zinc-800/70",
                 dropHint?.trackId === track.id ? "bg-violet-500/10" : "bg-zinc-900/30",
                 track.locked && "bg-[repeating-linear-gradient(45deg,transparent,transparent_6px,rgba(255,255,255,0.02)_6px,rgba(255,255,255,0.02)_12px)]",
               )}
@@ -483,6 +559,19 @@ export default function Timeline(props: Props) {
                     />
                   );
                 })}
+              {!ghost &&
+                !track.locked &&
+                cuts
+                  .filter((cut) => cut.into.trackId === track.id)
+                  .map((cut) => (
+                    <CutMarker
+                      key={cut.into.id}
+                      cut={cut}
+                      left={cut.at * pps}
+                      open={picker?.intoId === cut.into.id}
+                      onOpen={(rect) => setPicker({ intoId: cut.into.id, x: rect.left + rect.width / 2, y: rect.top })}
+                    />
+                  ))}
             </div>
           </div>
         ))}
@@ -499,6 +588,24 @@ export default function Timeline(props: Props) {
           </div>
         </div>
 
+        {/* Dropping onto a new track: a line where it will appear, with the clip's outline on it */}
+        {ghost?.newTrack &&
+          [...ghost.clips.values()]
+            .filter((c) => c.trackId === NEW_TRACK)
+            .map((c) => (
+              <div key={c.id} className="pointer-events-none absolute z-20" style={{ top: RULER_H + ghost.newTrack!.y, left: 0, right: 0 }}>
+                <div className="absolute inset-x-0 -top-px h-0.5 bg-violet-400" style={{ left: HEADER_W }} />
+                <div
+                  className="absolute -translate-y-1/2 rounded-md border-2 border-dashed border-violet-400 bg-violet-500/20 px-2 py-1 text-[11px] font-medium text-violet-100"
+                  style={{ left: HEADER_W + c.start * pps, width: Math.max(80, clipDuration(c) * pps), height: 40 }}
+                >
+                  {c.type === "video"
+                    ? `Шинэ давхарга — ${ghost.newTrack!.at === "top" ? "урд харагдана" : "ард харагдана"}`
+                    : `Шинэ track — ${ghost.newTrack!.at === "top" ? "дээр" : "доор"}`}
+                </div>
+              </div>
+            ))}
+
         {/* Snap guide */}
         {ghost?.snapAt != null && (
           <div className="pointer-events-none absolute bottom-0 top-0 z-20 w-px bg-sky-400" style={{ left: HEADER_W + ghost.snapAt * pps }} />
@@ -508,6 +615,16 @@ export default function Timeline(props: Props) {
         )}
 
         <Playhead clock={clock} pps={pps} onGrab={startScrub} />
+        {picker && pickerCut && (
+          <TransitionPicker
+            cut={pickerCut}
+            x={picker.x}
+            y={picker.y}
+            cutCount={cuts.length}
+            onApply={(t, everywhere) => applyTransition(pickerCut, t, everywhere)}
+            onClose={() => setPicker(null)}
+          />
+        )}
       </div>
     </div>
   );
@@ -570,8 +687,8 @@ function GapView({
 }
 
 function Ruler({ pps, from, to }: { pps: number; from: number; to: number }) {
-  const steps = [0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1800, 3600];
-  const major = steps.find((s) => s * pps >= 64) ?? 3600;
+  const steps = [0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 14400];
+  const major = steps.find((s) => s * pps >= 64) ?? 14400;
   const minor = major / 5;
   const ticks: { t: number; major: boolean }[] = [];
   for (let t = Math.floor(from / minor) * minor; t <= to + major; t += minor) {
@@ -607,15 +724,161 @@ function Playhead({ clock, pps, onGrab }: { clock: Clock; pps: number; onGrab: (
   );
 }
 
+const TRANSITION_ICONS: Record<TransitionType, ComponentType<{ className?: string }>> = {
+  fade: Blend,
+  black: Moon,
+  white: Sun,
+  slideleft: ArrowLeft,
+  slideright: ArrowRight,
+  slideup: ArrowUp,
+  slidedown: ArrowDown,
+  push: ChevronsLeft,
+};
+
+function CutMarker({ cut, left, open, onOpen }: { cut: Cut; left: number; open: boolean; onOpen: (rect: DOMRect) => void }) {
+  const t = cut.into.transition;
+  const Icon = t ? TRANSITION_ICONS[t.type] : Sparkles;
+  return (
+    <button
+      type="button"
+      title={t ? `Шилжилт: ${TRANSITION_LABELS[t.type]} · ${t.duration}с` : "Шилжилт нэмэх"}
+      onPointerDown={(e) => e.stopPropagation()}
+      onClick={(e) => onOpen(e.currentTarget.getBoundingClientRect())}
+      className={cx(
+        "absolute top-1/2 z-[5] flex h-6 w-6 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-md border shadow-md shadow-black/50 transition",
+        t || open
+          ? "border-violet-300 bg-violet-600 text-white hover:bg-violet-500"
+          : "border-zinc-500 bg-zinc-900/95 text-zinc-300 opacity-0 hover:border-violet-400 hover:text-white group-hover/lane:opacity-100",
+      )}
+      style={{ left }}
+    >
+      <Icon className="h-3.5 w-3.5" />
+    </button>
+  );
+}
+
+function TransitionPicker({
+  cut,
+  x,
+  y,
+  cutCount,
+  onApply,
+  onClose,
+}: {
+  cut: Cut;
+  x: number;
+  y: number;
+  cutCount: number;
+  onApply: (t: Transition | undefined, everywhere?: boolean) => void;
+  onClose: () => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const current = cut.into.transition;
+  const duration = current?.duration ?? DEFAULT_TRANSITION.duration;
+
+  useEffect(() => {
+    const away = (e: PointerEvent) => {
+      if (!ref.current?.contains(e.target as Node)) onClose();
+    };
+    const esc = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("pointerdown", away, true);
+    window.addEventListener("keydown", esc);
+    return () => {
+      window.removeEventListener("pointerdown", away, true);
+      window.removeEventListener("keydown", esc);
+    };
+  }, [onClose]);
+
+  const W = 296;
+  const left = Math.min(Math.max(8, x - W / 2), window.innerWidth - W - 8);
+  return createPortal(
+    <div
+      ref={ref}
+      className="fixed z-[100] rounded-xl border border-zinc-700 bg-zinc-900 p-3 shadow-2xl shadow-black/70"
+      style={{ left, bottom: window.innerHeight - y + 8, width: W }}
+    >
+      <div className="mb-2 text-xs font-semibold text-zinc-200">Шилжилт</div>
+      <div className="grid grid-cols-2 gap-1.5">
+        {TRANSITION_TYPES.map((type) => {
+          const Icon = TRANSITION_ICONS[type];
+          const on = current?.type === type;
+          return (
+            <button
+              key={type}
+              type="button"
+              onClick={() => onApply({ type, duration })}
+              className={cx(
+                "flex items-center gap-2 rounded-lg border px-2 py-1.5 text-left text-xs transition",
+                on ? "border-violet-500 bg-violet-500/20 text-white" : "border-zinc-800 text-zinc-300 hover:border-zinc-600 hover:bg-zinc-800",
+              )}
+            >
+              <Icon className="h-3.5 w-3.5 shrink-0" />
+              {TRANSITION_LABELS[type]}
+            </button>
+          );
+        })}
+      </div>
+      <div className="mt-3 mb-1.5 text-[11px] text-zinc-500">Урт</div>
+      <div className="flex gap-1">
+        {TRANSITION_DURATIONS.map((d) => (
+          <button
+            key={d}
+            type="button"
+            disabled={!current}
+            onClick={() => current && onApply({ ...current, duration: d })}
+            className={cx(
+              "flex-1 rounded-md border py-1 font-mono text-[11px] transition disabled:opacity-40",
+              Math.abs(duration - d) < 1e-6 ? "border-violet-500 bg-violet-500/20 text-white" : "border-zinc-800 text-zinc-400 hover:bg-zinc-800",
+            )}
+          >
+            {d}с
+          </button>
+        ))}
+      </div>
+      <div className="mt-3 flex gap-2">
+        {cutCount > 1 && (
+          <button
+            type="button"
+            disabled={!current}
+            onClick={() => current && onApply(current, true)}
+            className="flex-1 rounded-lg border border-zinc-700 px-2 py-1.5 text-xs text-zinc-200 transition hover:border-violet-500 disabled:opacity-40"
+          >
+            Бүх зүсэлтэд ({cutCount})
+          </button>
+        )}
+        <button
+          type="button"
+          disabled={!current}
+          onClick={() => {
+            onApply(undefined);
+            onClose();
+          }}
+          className="flex-1 rounded-lg border border-zinc-700 px-2 py-1.5 text-xs text-zinc-300 transition hover:border-red-500 hover:text-white disabled:opacity-40"
+        >
+          Арилгах
+        </button>
+      </div>
+      <p className="mt-2 text-[10px] leading-snug text-zinc-500">Playhead шилжилтийн өмнө зогсоно. Space дарж үзнэ.</p>
+    </div>,
+    document.body,
+  );
+}
+
 function TrackHeader({
   track,
   label,
+  rank,
   onPatch,
+  onMove,
   onDelete,
 }: {
   track: Track;
   label: string;
+  rank: { index: number; count: number };
   onPatch: (p: Partial<Track>) => void;
+  onMove: (to: TrackMove) => void;
   onDelete: () => void;
 }) {
   const Icon = track.kind === "video" ? Film : track.kind === "audio" ? Music : Type;
@@ -640,6 +903,28 @@ function TrackHeader({
       <button type="button" title={track.locked ? "Түгжээ тайлах" : "Түгжих"} className={btn} onClick={() => onPatch({ locked: !track.locked })}>
         {track.locked ? <Lock className="h-3.5 w-3.5 text-amber-400" /> : <Unlock className="h-3.5 w-3.5" />}
       </button>
+      {rank.count > 1 && (
+        <span className="hidden flex-col group-hover:flex">
+          <button
+            type="button"
+            title={track.kind === "video" ? "Урагшлуулах: бусад видеоны өмнө харагдана" : "Дээш зөөх"}
+            disabled={rank.index === 0}
+            className="rounded px-0.5 text-zinc-500 transition hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-25"
+            onClick={(e) => onMove(e.shiftKey ? "top" : "up")}
+          >
+            <ChevronUp className="h-3 w-3" />
+          </button>
+          <button
+            type="button"
+            title={track.kind === "video" ? "Хойшлуулах: бусад видеоны ард харагдана" : "Доош зөөх"}
+            disabled={rank.index === rank.count - 1}
+            className="rounded px-0.5 text-zinc-500 transition hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-25"
+            onClick={(e) => onMove(e.shiftKey ? "bottom" : "down")}
+          >
+            <ChevronDown className="h-3 w-3" />
+          </button>
+        </span>
+      )}
       <button type="button" title="Track устгах" className={cx(btn, "hidden group-hover:block")} onClick={onDelete}>
         <Trash2 className="h-3.5 w-3.5" />
       </button>

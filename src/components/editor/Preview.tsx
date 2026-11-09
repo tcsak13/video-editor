@@ -6,12 +6,14 @@ import {
   aspectRatio,
   clipBoxSize,
   clipEnd,
+  frameGeometry,
   type Crop,
   type MediaClip,
   type Project,
   type TextClip,
 } from "@/lib/timeline";
 import { cssFontFamily } from "@/lib/fonts";
+import { handles, transitionLook, transitionPlan, type ClipTransitions } from "@/lib/transitions";
 import CropEditor from "./CropEditor";
 import { playableUrl, type MediaItem } from "./media";
 import { cx, useClockTime, type Clock } from "./store";
@@ -54,6 +56,8 @@ export default function Preview({
   const elements = useRef(new Map<string, HTMLMediaElement>());
   const boxes = useRef(new Map<string, HTMLElement>());
   const projectRef = useRef(project);
+  const planCache = useRef<{ clips: Project["clips"] | null; plan: Map<string, ClipTransitions> }>({ clips: null, plan: new Map() });
+  const sizeRef = useRef({ cw: 1, ch: 1 });
   const [guides, setGuides] = useState<{ v: boolean; h: boolean }>({ v: false, h: false });
 
   useEffect(() => {
@@ -75,27 +79,47 @@ export default function Preview({
   const tracks = new Map(project.tracks.map((t) => [t.id, t]));
   const z = (trackId: string) => (project.tracks.length - (trackIndex.get(trackId) ?? 0)) * 10;
 
+  useEffect(() => {
+    sizeRef.current = { cw, ch };
+  }, [cw, ch]);
+
   // Keep every media element in step with the clock (runs on each tick, outside React).
   const sync = useCallback(() => {
     const p = projectRef.current;
     const t = clock.time;
     const playing = clock.playing;
     const trackById = new Map(p.tracks.map((tr) => [tr.id, tr]));
+    if (planCache.current.clips !== p.clips) planCache.current = { clips: p.clips, plan: transitionPlan(p.clips) };
+    const { cw: w, ch: h } = sizeRef.current;
 
     for (const clip of p.clips) {
       const track = trackById.get(clip.trackId);
       const start = clip.start;
       const end = clipEnd(clip);
-      const active = t >= start && t < end;
+      const tr = clip.type === "video" ? planCache.current.plan.get(clip.id) : undefined;
+      // A cross transition keeps the clip on screen a little before its start and after its end.
+      const { pre, post } = handles(tr);
+      const active = t >= start - pre && t < end + post;
       const box = boxes.current.get(clip.id);
       if (box) box.style.visibility = active && !track?.hidden && !clip.hidden ? "visible" : "hidden";
       if (clip.type === "text") continue;
+      if (box && clip.type === "video") {
+        const look = transitionLook(tr, t);
+        box.style.opacity = String(clip.opacity * look.alpha);
+        box.style.transform = look.dx || look.dy ? `translate(${look.dx * w}px, ${look.dy * h}px)` : "";
+        const tint = box.querySelector<HTMLElement>("[data-tint]");
+        if (tint) {
+          tint.style.background = look.tint?.color ?? "black";
+          tint.style.opacity = String(look.tint?.amount ?? 0);
+        }
+      }
 
       const el = elements.current.get(clip.id);
       if (!el) continue;
       const local = t - start;
-      const desired = clip.in + local * clip.speed;
-      const audible = !clip.muted && !track?.muted && !(clip.type === "video" && clip.audioDetached);
+      const desired = Math.max(0, clip.in + local * clip.speed);
+      // Sound still cuts at the clip's own edges, even while a transition shows the picture.
+      const audible = !clip.muted && !track?.muted && !(clip.type === "video" && clip.audioDetached) && t >= start && t < end;
       const dur = end - start;
       let gain = Math.min(1, clip.volume);
       if (clip.fadeIn > 0) gain *= Math.min(1, local / clip.fadeIn);
@@ -119,7 +143,8 @@ export default function Preview({
       } else {
         if (!el.paused) el.pause();
         // Pre-roll the next clip so the cut is seamless.
-        if (t < start && start - t < 2 && Math.abs(el.currentTime - clip.in) > 0.1 && !el.seeking) el.currentTime = clip.in;
+        const first = Math.max(0, clip.in - pre * clip.speed);
+        if (t < start - pre && start - pre - t < 2 && Math.abs(el.currentTime - first) > 0.1 && !el.seeking) el.currentTime = first;
       }
     }
   }, [clock]);
@@ -263,6 +288,8 @@ export default function Preview({
           const { l, r, t, b } = clip.crop;
           const fullW = innerW / (1 - l - r);
           const fullH = innerH / (1 - t - b);
+          const fg = frameGeometry(box.w, box.h, clip.frame);
+          const cardColor = clip.frame ? clip.frame.color + Math.round(clip.frame.opacity * 255).toString(16).padStart(2, "0") : "";
           return (
             <div
               key={clip.id}
@@ -275,39 +302,50 @@ export default function Preview({
                 top: clip.y * ch - box.h / 2,
                 width: box.w,
                 height: box.h,
-                zIndex: z(clip.trackId),
+                // A clip with an incoming transition draws over the one it replaces on the same track.
+                zIndex: z(clip.trackId) + (clip.transition ? 1 : 0),
                 opacity: clip.opacity,
                 visibility: "hidden",
               }}
             >
+              {fg.hasBg && (
+                <div className="pointer-events-none absolute" style={{ inset: -fg.pad, borderRadius: fg.outerR, background: cardColor }} />
+              )}
               <div
-                className="absolute left-1/2 top-1/2 overflow-hidden"
-                style={{
-                  width: innerW,
-                  height: innerH,
-                  transform: `translate(-50%, -50%) scale(${clip.flipH ? -1 : 1}, ${clip.flipV ? -1 : 1}) rotate(${clip.rotate}deg)`,
-                }}
-              >
-                {m.info.isImage ? (
-                  // eslint-disable-next-line @next/next/no-img-element -- local blob/preview URL, drawn with crop offsets
-                  <img
-                    src={url}
-                    alt=""
-                    draggable={false}
-                    className="pointer-events-none absolute max-w-none object-fill"
-                    style={{ width: fullW, height: fullH, left: -l * fullW, top: -t * fullH }}
-                  />
-                ) : (
-                  <video
-                    ref={setElement(clip.id)}
-                    src={url}
-                    preload="auto"
-                    playsInline
-                    onError={() => onMediaError(m.id)}
-                    className="pointer-events-none absolute max-w-none object-fill"
-                    style={{ width: fullW, height: fullH, left: -l * fullW, top: -t * fullH }}
-                  />
-                )}
+                data-tint
+                className="pointer-events-none absolute z-10"
+                style={{ inset: -fg.pad, borderRadius: fg.hasBg ? fg.outerR : fg.innerR, opacity: 0 }}
+              />
+              <div className="absolute inset-0 overflow-hidden" style={{ borderRadius: fg.innerR }}>
+                <div
+                  className="absolute left-1/2 top-1/2 overflow-hidden"
+                  style={{
+                    width: innerW,
+                    height: innerH,
+                    transform: `translate(-50%, -50%) scale(${clip.flipH ? -1 : 1}, ${clip.flipV ? -1 : 1}) rotate(${clip.rotate}deg)`,
+                  }}
+                >
+                  {m.info.isImage ? (
+                    // eslint-disable-next-line @next/next/no-img-element -- local blob/preview URL, drawn with crop offsets
+                    <img
+                      src={url}
+                      alt=""
+                      draggable={false}
+                      className="pointer-events-none absolute max-w-none object-fill"
+                      style={{ width: fullW, height: fullH, left: -l * fullW, top: -t * fullH }}
+                    />
+                  ) : (
+                    <video
+                      ref={setElement(clip.id)}
+                      src={url}
+                      preload="auto"
+                      playsInline
+                      onError={() => onMediaError(m.id)}
+                      className="pointer-events-none absolute max-w-none object-fill"
+                      style={{ width: fullW, height: fullH, left: -l * fullW, top: -t * fullH }}
+                    />
+                  )}
+                </div>
               </div>
             </div>
           );

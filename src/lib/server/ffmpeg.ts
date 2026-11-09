@@ -18,7 +18,7 @@ export function runCapture(args: string[]): Promise<{ code: number | null; stdou
   });
 }
 
-function parseTimestamp(ts: string): number | null {
+export function parseTimestamp(ts: string): number | null {
   const m = /^(\d+):(\d{2}):(\d{2}(?:\.\d+)?)$/.exec(ts.trim());
   if (!m) return null;
   return Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]);
@@ -30,6 +30,11 @@ function parseTimestamp(ts: string): number | null {
  */
 export async function probeMedia(filePath: string): Promise<MediaInfo> {
   const { stderr } = await runCapture(["-hide_banner", "-nostdin", "-i", filePath]);
+  return parseMediaInfo(stderr);
+}
+
+/** Reads the stream summary `ffmpeg -i` printed (see probeMedia). */
+export function parseMediaInfo(stderr: string): MediaInfo {
   if (!/Stream #/.test(stderr)) {
     throw new Error("Файлыг уншиж чадсангүй — видео файл мөн эсэхийг шалгана уу.");
   }
@@ -85,6 +90,14 @@ export async function probeMedia(filePath: string): Promise<MediaInfo> {
     container,
     isImage,
   };
+}
+
+const even = (n: number) => Math.max(2, Math.round(n / 2) * 2);
+
+/** Frame size with the short side at `target` (1080 → 1920×1080 or 1080×1920), never upscaled. */
+export function frameSize(width: number, height: number, target: number): [number, number] {
+  const short = Math.min(target, width, height);
+  return width >= height ? [even((width * short) / height), even(short)] : [even(short), even((height * short) / width)];
 }
 
 let encoderCache: Promise<Record<Encoder, boolean>> | null = null;

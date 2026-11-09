@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start -H 127.0.0.1",
     "lint": "eslint",
-    "fonts": "node scripts/fetch-fonts.mjs"
+    "fonts": "node scripts/fetch-fonts.mjs",
+    "merge": "node scripts/merge-parts.mjs"
   },
   "dependencies": {
     "ffmpeg-static": "^5.3.0",

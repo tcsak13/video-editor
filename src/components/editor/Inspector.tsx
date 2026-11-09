@@ -15,6 +15,7 @@ import {
   Replace,
   RotateCw,
   Shrink,
+  SquareRoundCorner,
   Trash2,
   Type,
   Unlink,
@@ -36,6 +37,7 @@ import {
   clipDuration,
   coverScale,
   type Clip,
+  type ClipFrame,
   type MediaClip,
   type Project,
   type Rotation,
@@ -506,6 +508,8 @@ function MediaClipPanel({ clip, media, project, patchClip, onDetach, onDelete, o
           <Section title="Тунгалаг байдал (Opacity)">
             <Slider label="Opacity" value={clip.opacity * 100} min={0} max={100} unit="%" onChange={(v) => set({ opacity: v / 100 }, "opacity")} />
           </Section>
+
+          <FrameSection clip={clip} set={set} />
         </>
       )}
 
@@ -553,6 +557,60 @@ function MediaClipPanel({ clip, media, project, patchClip, onDetach, onDelete, o
         </>
       )}
     </div>
+  );
+}
+
+const FRAME_PRESETS: { label: string; frame: ClipFrame | undefined }[] = [
+  { label: "Байхгүй", frame: undefined },
+  { label: "Цагаан", frame: { color: "#ffffff", opacity: 0.95, padding: 0.18, radius: 0.3 } },
+  { label: "Хар", frame: { color: "#000000", opacity: 0.55, padding: 0.18, radius: 0.3 } },
+  { label: "Булан", frame: { color: "#000000", opacity: 0, padding: 0, radius: 0.15 } },
+];
+const FRAME_COLORS = ["#ffffff", "#000000", "#18181b", "#f97316", "#7c3aed", "#facc15"];
+
+/** Card behind the picture (a logo on a rounded panel) and rounded corners. */
+function FrameSection({ clip, set }: { clip: MediaClip; set: (p: Partial<MediaClip>, key?: string) => void }) {
+  const fr = clip.frame;
+  const patch = (p: Partial<ClipFrame>, key?: string) => fr && set({ frame: { ...fr, ...p } }, key);
+  const same = (a: ClipFrame | undefined, b: ClipFrame | undefined) => JSON.stringify(a) === JSON.stringify(b);
+  return (
+    <Section icon={SquareRoundCorner} title="Ар дэвсгэр ба булан" onReset={() => set({ frame: undefined })}>
+      <div className="grid grid-cols-4 gap-1">
+        {FRAME_PRESETS.map((p) => (
+          <button
+            key={p.label}
+            type="button"
+            onClick={() => set({ frame: p.frame })}
+            className={cx(
+              "rounded-lg border py-1.5 text-xs transition",
+              same(fr, p.frame) ? "border-violet-500 bg-violet-500/20 text-white" : "border-zinc-800 text-zinc-400 hover:border-zinc-600",
+            )}
+          >
+            {p.label}
+          </button>
+        ))}
+      </div>
+      {fr && (
+        <>
+          <div className="flex items-center gap-1.5">
+            {FRAME_COLORS.map((c) => (
+              <button
+                key={c}
+                type="button"
+                onClick={() => patch({ color: c, opacity: fr.opacity || 0.8, padding: fr.opacity ? fr.padding : 0.18 })}
+                className={cx("h-6 w-6 rounded-full border-2", fr.opacity > 0 && fr.color === c ? "border-violet-400" : "border-zinc-700")}
+                style={{ background: c }}
+                aria-label={c}
+              />
+            ))}
+            <input type="color" value={fr.color} onChange={(e) => patch({ color: e.target.value }, "frame-color")} className="h-6 w-8 cursor-pointer rounded bg-transparent" />
+          </div>
+          <Slider label="Дэвсгэр" value={fr.opacity * 100} min={0} max={100} unit="%" onChange={(v) => patch({ opacity: v / 100 }, "frame-opacity")} />
+          <Slider label="Зай" value={fr.padding * 100} min={0} max={60} unit="%" onChange={(v) => patch({ padding: v / 100 }, "frame-padding")} />
+          <Slider label="Булан" value={fr.radius * 100} min={0} max={50} unit="%" onChange={(v) => patch({ radius: v / 100 }, "frame-radius")} />
+        </>
+      )}
+    </Section>
   );
 }
 

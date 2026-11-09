@@ -13,6 +13,7 @@ import {
 import { findFont, streamEncodeJob } from "@/lib/server/job";
 import { MAX_MEDIA, pick, sanitizeProject, str } from "@/lib/server/project";
 import { fontFile } from "@/lib/server/fonts";
+import { roundedCardPng, roundedMaskPng } from "@/lib/server/png";
 import { JOBS_DIR, jsonError, rejectNonLocal, resolveSource, statFile, sweepOldData } from "@/lib/server/storage";
 import {
   EXPORT_FORMATS,
@@ -24,11 +25,13 @@ import {
   clipBoxSize,
   clipDuration,
   clipEnd,
+  frameGeometry,
   type ExportSettings,
   type MediaClip,
   type Project,
   type TextClip,
 } from "@/lib/timeline";
+import { INCOMING_FROM, OUTGOING_TO, handles, transitionPlan, type Active } from "@/lib/transitions";
 
 function sanitizeSettings(raw: unknown): ExportSettings {
   const s = (raw ?? {}) as Partial<ExportSettings>;
@@ -89,12 +92,19 @@ function textFilters(clip: TextClip, W: number, H: number, fontFile: string, fil
   );
 }
 
+/** Smoothstep 0→1 across a transition, as an ffmpeg expression of the output time `t`. */
+function easeExpr(a: Active): string {
+  const p = `clip((t-${f(a.at - a.d / 2)})/${f(a.d)},0,1)`;
+  return `(${p}*${p}*(3-2*${p}))`;
+}
+
 type Plan = {
   inputs: string[][]; // per-input arg groups (each ends with -i path)
   graph: string[];
   hasVideo: boolean;
   hasAudio: boolean;
-  textFiles: { name: string; content: string }[];
+  /** Written into the job dir before ffmpeg runs (text lines, card and mask pictures). */
+  files: { name: string; content: string | Buffer }[];
 };
 
 function buildPlan(
@@ -113,12 +123,14 @@ function buildPlan(
   const inputs: string[][] = [];
   const graph: string[] = [];
   const audioLabels: string[] = [];
-  const textFiles: Plan["textFiles"] = [];
+  const files: Plan["files"] = [];
 
   // Visual clips draw bottom track first so upper tracks end up in front.
   const mediaClips = project.clips
     .filter((c): c is MediaClip => c.type !== "text")
     .sort((a, b) => trackOrder.get(b.trackId)! - trackOrder.get(a.trackId)! || a.start - b.start);
+
+  const transitions = transitionPlan(project.clips);
 
   let canvas = "base";
   if (!audioOnly) graph.push(`color=c=${hex(project.background)}:s=${W}x${H}:r=${FPS}:d=${f(total)},format=yuv420p[base]`);
@@ -136,16 +148,22 @@ function buildPlan(
       m.info.hasAudio && !track.muted && !clip.muted && clip.volume > 0 && !(clip.type === "video" && clip.audioDetached);
     if (!visible && !audible) return;
 
+    // Cross transitions keep the picture on screen `pre` seconds before the clip and `post` after it.
+    const tr = visible ? transitions.get(clip.id) : undefined;
+    const { pre, post } = handles(tr);
+    const ss = Math.max(0, clip.in - pre * clip.speed);
+    const lead = (ss - (clip.in - pre * clip.speed)) / clip.speed; // file starts too late: hold its first frame
+
     const i = inputs.length;
     inputs.push(
       m.info.isImage
         ? // A still picture is looped into a stream exactly as long as its clip.
-          ["-loop", "1", "-framerate", String(FPS), "-t", f(clip.out - clip.in), "-i", m.path]
+          ["-loop", "1", "-framerate", String(FPS), "-t", f(clip.out - clip.in + pre + post), "-i", m.path]
         : [
             ...(visible && encoder === "videotoolbox" ? ["-hwaccel", "videotoolbox"] : []),
             ...legacyInputFlags(m.path),
-            "-ss", f(clip.in),
-            "-t", f(clip.out - clip.in),
+            "-ss", f(ss),
+            "-t", f(clip.out - ss + post * clip.speed),
             "-i", m.path,
           ],
     );
@@ -165,24 +183,78 @@ function buildPlan(
       if (clip.flipV) vf.push("vflip");
       if (clip.speed !== 1) vf.push(`setpts=PTS/${f(clip.speed)}`);
       vf.push(`fps=${FPS}`);
+      if (!m.info.isImage) {
+        if (lead > 0.001) vf.push(`tpad=start_mode=clone:start_duration=${f(lead)}`);
+        // Past the end of the file the last frame holds (the overlay window cuts off any extra).
+        if (post > 0) vf.push(`tpad=stop_mode=clone:stop_duration=${f(post)}`);
+      }
 
       const box = clipBoxSize(m.info.width ?? W, m.info.height ?? H, clip, W, H);
       const bw = even(box.w);
       const bh = even(box.h);
       vf.push(`scale=${bw}:${bh}`, "setsar=1");
-      if (clip.opacity < 1) vf.push("format=yuva420p", `colorchannelmixer=aa=${f(clip.opacity)}`);
-      vf.push(`setpts=PTS+${f(start)}/TB`);
-      graph.push(`[${i}:v]${vf.join(",")}[v${k}]`);
 
-      const x = Math.round(clip.x * W - bw / 2);
-      const y = Math.round(clip.y * H - bh / 2);
-      graph.push(`[${canvas}][v${k}]overlay=x=${x}:y=${y}:eof_action=pass:enable='between(t,${f(start)},${f(end)})'[o${k}]`);
+      // Card / rounded corners: still pictures written to the job dir and looped alongside the clip.
+      const fg = frameGeometry(bw, bh, clip.frame);
+      const pad = fg.hasBg ? Math.round(fg.pad) : 0;
+      const innerR = Math.round(fg.innerR);
+      const loopFor = ["-loop", "1", "-framerate", String(FPS), "-t", f(clipDuration(clip) + pre + post + 0.5)];
+      let src = `[${i}:v]`;
+      if (innerR > 0 || fg.hasBg) {
+        vf.push("format=yuva420p");
+        graph.push(`${src}${vf.join(",")}[p${k}]`);
+        vf.length = 0;
+        src = `[p${k}]`;
+        if (innerR > 0) {
+          const mi = inputs.length;
+          files.push({ name: `mask_${k}.png`, content: roundedMaskPng(bw, bh, innerR) });
+          inputs.push([...loopFor, "-i", `mask_${k}.png`]);
+          // Multiply alphas (alphamerge would replace them and turn a transparent logo's background black).
+          graph.push(`[${mi}:v]format=yuva420p[m${k}]`, `${src}[m${k}]blend=c3_mode=multiply:shortest=1[pm${k}]`);
+          src = `[pm${k}]`;
+        }
+        if (fg.hasBg) {
+          const ci = inputs.length;
+          files.push({ name: `card_${k}.png`, content: roundedCardPng(bw + 2 * pad, bh + 2 * pad, Math.round(fg.outerR), clip.frame!.color, clip.frame!.opacity) });
+          inputs.push([...loopFor, "-i", `card_${k}.png`]);
+          graph.push(`[${ci}:v]format=yuva420p[c${k}]`, `[c${k}]${src}overlay=${pad}:${pad}:shortest=1[pc${k}]`);
+          src = `[pc${k}]`;
+        }
+      }
+      if (clip.opacity < 1) vf.push("format=yuva420p", `colorchannelmixer=aa=${f(clip.opacity)}`);
+      vf.push(`setpts=PTS+${f(start - pre)}/TB`);
+      const inc = tr?.incoming;
+      const out = tr?.outgoing;
+      if (inc?.type === "fade") {
+        if (clip.opacity >= 1) vf.push("format=yuva420p");
+        vf.push(`fade=t=in:st=${f(inc.at - inc.d / 2)}:d=${f(inc.d)}:alpha=1`);
+      }
+      if (inc?.type === "black" || inc?.type === "white") vf.push(`fade=t=in:st=${f(inc.at)}:d=${f(inc.d / 2)}:color=${inc.type}`);
+      if (out?.type === "black" || out?.type === "white") vf.push(`fade=t=out:st=${f(out.at - out.d / 2)}:d=${f(out.d / 2)}:color=${out.type}`);
+      graph.push(`${src}${vf.join(",")}[v${k}]`);
+
+      // Slides and pushes move the picture by whole canvas widths/heights, eased.
+      const motion = (base: number, size: number, axis: "x" | "y") => {
+        const terms = [String(base)];
+        const from = inc && INCOMING_FROM[inc.type]?.[axis];
+        if (inc && from) terms.push(`(${f(from * size)})*(1-${easeExpr(inc)})`);
+        const to = out && OUTGOING_TO[out.type]?.[axis];
+        if (out && to) terms.push(`(${f(to * size)})*${easeExpr(out)}`);
+        return terms.length > 1 ? `'${terms.join("+")}'` : String(base);
+      };
+      const x = motion(Math.round(clip.x * W - bw / 2) - pad, W, "x");
+      const y = motion(Math.round(clip.y * H - bh / 2) - pad, H, "y");
+      graph.push(
+        `[${canvas}][v${k}]overlay=x=${x}:y=${y}:eof_action=pass:enable='between(t,${f(start - pre)},${f(end + post)})'[o${k}]`,
+      );
       canvas = `o${k}`;
     }
 
     if (audible) {
       const dur = clipDuration(clip);
-      const af = ["asetpts=PTS-STARTPTS", ...atempoChain(clip.speed)];
+      // The input may start early / run long for a transition; the sound still cuts at the clip.
+      const trim = pre || post ? [`atrim=start=${f(clip.in - ss)}:duration=${f(clip.out - clip.in)}`] : [];
+      const af = [...trim, "asetpts=PTS-STARTPTS", ...atempoChain(clip.speed)];
       if (clip.volume !== 1) af.push(`volume=${f(clip.volume)}`);
       if (clip.fadeIn > 0) af.push(`afade=t=in:st=0:d=${f(Math.min(clip.fadeIn, dur))}`);
       if (clip.fadeOut > 0) af.push(`afade=t=out:st=${f(Math.max(0, dur - clip.fadeOut))}:d=${f(Math.min(clip.fadeOut, dur))}`);
@@ -201,7 +273,7 @@ function buildPlan(
     const drawtexts = textClips.flatMap((clip, k) =>
       textFilters(clip, W, H, clipFonts.get(clip.id) ?? "font.ttf", (line) => {
         const name = `text_${k}_${line}.txt`;
-        textFiles.push({ name, content: clip.text.split("\n")[line] });
+        files.push({ name, content: clip.text.split("\n")[line] });
         return name;
       }),
     );
@@ -216,7 +288,7 @@ function buildPlan(
     graph.push(`${audioLabels.join("")}amix=inputs=${audioLabels.length}:normalize=0:dropout_transition=0,${pad}[aout]`);
   }
 
-  return { inputs, graph, hasVideo: !audioOnly, hasAudio: audioLabels.length > 0, textFiles };
+  return { inputs, graph, hasVideo: !audioOnly, hasAudio: audioLabels.length > 0, files };
 }
 
 // ---------------------------------------------------------------------------
@@ -281,7 +353,7 @@ export async function POST(request: Request) {
   await fs.mkdir(jobDir, { recursive: true });
   if (systemFont) await fs.copyFile(systemFont, path.join(jobDir, "font.ttf"));
   for (const [file, name] of fontCopies) await fs.copyFile(file, path.join(jobDir, name));
-  for (const file of probePlan.textFiles) await fs.writeFile(path.join(jobDir, file.name), file.content, "utf8");
+  for (const file of probePlan.files) await fs.writeFile(path.join(jobDir, file.name), file.content);
 
   const stamp = new Date().toISOString().slice(0, 16).replace(/[-:]/g, "").replace("T", "-");
   const outputName = `video_edit_${stamp}.${settings.format}`;

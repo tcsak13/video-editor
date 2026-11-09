@@ -17,6 +17,8 @@ import {
   ChevronRight,
   Copy,
   FilePlus2,
+  BringToFront,
+  Combine,
   Keyboard,
   LayoutTemplate,
   Magnet,
@@ -26,6 +28,7 @@ import {
   Redo2,
   Replace,
   Scissors,
+  SendToBack,
   Shrink,
   SkipBack,
   SkipForward,
@@ -62,6 +65,7 @@ import { buildProxy, mediaDuration, mediaFromInfo, probePath, sourceUrl, uploadF
 import {
   addMedia,
   addText,
+  canJoin,
   deleteClips,
   detachAudio,
   duplicateClips,
@@ -69,12 +73,15 @@ import {
   emptyProject,
   fitCanvasToClip,
   isFree,
+  joinClips,
   linkedClips,
+  moveTrack,
   newMediaClip,
   pasteClips,
   closeGap,
   replaceClipMedia,
   splitClips,
+  trackRank,
   trimToPlayhead,
   uid,
   updateClip,
@@ -83,7 +90,7 @@ import {
 import Preview from "./Preview";
 import { loadFonts } from "./fonts";
 import { Clock, cx, timecode, useClockPlaying, useClockTime, useProjectHistory } from "./store";
-import Timeline, { type TimelineMenuRequest } from "./Timeline";
+import Timeline, { HEADER_W, MAX_PPS, MIN_PPS, clampPps, type TimelineMenuRequest } from "./Timeline";
 import ContextMenu, { type MenuItem } from "./ContextMenu";
 import ReplaceDialog from "./ReplaceDialog";
 import TemplatesDialog from "./TemplatesDialog";
@@ -424,6 +431,39 @@ export default function Editor() {
     [commit],
   );
 
+  /**
+   * What "join" works on: the selected clips (a single selected clip takes the neighbour it continues
+   * into), or with nothing selected the pieces that meet at the playhead. Detached audio joins along.
+   */
+  const joinTargets = useCallback(
+    (ids: string[], time: number) => {
+      const unlocked = (c: Clip) => !project.tracks.find((tr) => tr.id === c.trackId)?.locked;
+      const withTwins = (cs: Clip[]) => [...new Set(cs.filter(unlocked).flatMap((c) => [c.id, ...linkedClips(project, c.id)]))];
+      const base = project.clips.filter((c) => ids.includes(c.id));
+      if (base.length) {
+        const own = withTwins(base);
+        if (joinClips(project, own).joined.length) return own;
+        // Nothing to join inside the selection (one clip, or a clip and its audio): each takes its neighbour.
+        return withTwins(
+          base.flatMap((c) => {
+            const partner = project.clips.find((x) => canJoin(c, x)) ?? project.clips.find((x) => canJoin(x, c));
+            return partner ? [c, partner] : [c];
+          }),
+        );
+      }
+      const tol = Math.max(0.05, 8 / pps);
+      return withTwins(
+        project.clips
+          .filter((a) => Math.abs(clipEnd(a) - time) <= tol)
+          .flatMap((a) => {
+            const b = project.clips.find((x) => canJoin(a, x));
+            return b ? [a, b] : [];
+          }),
+      );
+    },
+    [pps, project],
+  );
+
   const actions = useMemo(() => {
     const t = () => clock.time;
     const sel = () => project.clips.filter((c) => liveSelected.includes(c.id));
@@ -436,6 +476,15 @@ export default function Editor() {
         if (!ids.length) ids = project.clips.filter((c) => spanning(c) && unlocked(c)).map((c) => c.id);
         if (!ids.length) return setToast("Playhead дээр хуваах клип алга");
         commit((p) => splitClips(p, ids, time).project);
+      },
+      join(ids = liveSelected) {
+        const r = joinClips(project, joinTargets(ids, t()));
+        if (!r.joined.length) {
+          return setToast(ids.length ? "Нийлүүлэх хэсэг алга: нэг бичлэгийн зэрэгцээ, тасралтгүй хэсгүүд байх ёстой" : "Playhead дээр нийлүүлэх зүсэлт алга");
+        }
+        commit(r.project);
+        setSelected(r.joined);
+        setToast("Хэсгүүдийг нэг болголоо · ⌘Z буцаана");
       },
       remove(ripple: boolean) {
         if (!liveSelected.length) return;
@@ -509,7 +558,7 @@ export default function Editor() {
         clock.seek(target ?? (dir > 0 ? duration : 0));
       },
     };
-  }, [clock, commit, duration, liveSelected, mediaMap, project]);
+  }, [clock, commit, duration, joinTargets, liveSelected, mediaMap, project]);
 
   const startCrop = useCallback(
     (clipId?: string) => {
@@ -555,10 +604,10 @@ export default function Editor() {
     [clock, commit, liveSelected, mediaMap, project],
   );
 
-  const zoom = useCallback((factor: number) => setPps((p) => Math.min(400, Math.max(2, p * factor))), []);
+  const zoom = useCallback((factor: number) => setPps((p) => clampPps(p * factor)), []);
   const zoomFit = useCallback(() => {
-    const w = (document.querySelector("[data-timeline]")?.clientWidth ?? 1000) - 180;
-    setPps(Math.min(400, Math.max(2, w / Math.max(5, duration))));
+    const w = (document.querySelector("[data-timeline]")?.clientWidth ?? 1000) - HEADER_W - 16;
+    setPps(clampPps(w / Math.max(5, duration)));
   }, [duration]);
 
   // --- keyboard shortcuts (by physical key, so they work on the Mongolian layout too) ---
@@ -624,7 +673,8 @@ export default function Editor() {
           break;
         case "KeyS":
           handled();
-          actions.split();
+          if (e.shiftKey) actions.join();
+          else actions.split();
           break;
         case "Delete":
         case "Backspace":
@@ -790,6 +840,27 @@ export default function Editor() {
     const targets = project.clips.filter((c) => ids.includes(c.id));
     const time = req.playhead;
     const canSplit = targets.some((c) => c.start < time - 0.01 && clipEnd(c) > time + 0.01);
+    const joinable = joinClips(project, joinTargets(ids, time)).joined.length > 0;
+    // Layer order is per track: bringing a clip forward moves its whole track.
+    const layer = clicked && clicked.type !== "audio" ? trackRank(project, clicked.trackId) : null;
+    const layerItems: MenuItem[] =
+      clicked && layer && layer.count > 1
+        ? [
+            {
+              label: "Хамгийн урд гаргах",
+              icon: BringToFront,
+              separator: true,
+              disabled: layer.index === 0,
+              onSelect: () => commit((p) => moveTrack(p, clicked.trackId, "top")),
+            },
+            {
+              label: "Хамгийн ард оруулах",
+              icon: SendToBack,
+              disabled: layer.index === layer.count - 1,
+              onSelect: () => commit((p) => moveTrack(p, clicked.trackId, "bottom")),
+            },
+          ]
+        : [];
     const visual = targets.filter((c) => c.type !== "audio");
     const media = targets.filter((c): c is MediaClip => c.type !== "text");
     const detachable = media.some((c) => c.type === "video" && !c.audioDetached && mediaMap.get(c.mediaId)?.info?.hasAudio);
@@ -817,6 +888,7 @@ export default function Editor() {
     return [
       ...picItems,
       { label: "Хуваах", icon: Scissors, shortcut: "S", disabled: !canSplit, separator: picItems.length > 0, onSelect: actions.split },
+      { label: "Нийлүүлэх", icon: Combine, shortcut: "⇧S", disabled: !joinable, onSelect: () => actions.join(ids) },
       { label: "Хувилах", icon: CopyPlus, shortcut: `${MOD}D`, separator: true, onSelect: actions.duplicate },
       { label: "Хуулах", icon: Copy, shortcut: `${MOD}C`, onSelect: actions.copy },
       paste,
@@ -842,6 +914,7 @@ export default function Editor() {
         disabled: !clicked || clicked.type === "text",
         onSelect: () => openReplace(req.clipId!),
       },
+      ...layerItems,
       { label: "Устгах", icon: Trash2, shortcut: "⌫", danger: true, separator: true, onSelect: () => actions.remove(false) },
     ];
   };
@@ -920,6 +993,12 @@ export default function Editor() {
         </IconBtn>
         <Link href="/compress" className="rounded-lg px-2 py-1 text-xs text-zinc-400 transition hover:bg-zinc-800 hover:text-white">
           Хурдан шахах
+        </Link>
+        <Link href="/merge" className="rounded-lg px-2 py-1 text-xs text-zinc-400 transition hover:bg-zinc-800 hover:text-white">
+          Хэсэг нийлүүлэх
+        </Link>
+        <Link href="/convert" className="rounded-lg px-2 py-1 text-xs text-zinc-400 transition hover:bg-zinc-800 hover:text-white">
+          Олноор хөрвүүлэх
         </Link>
         <button
           type="button"
@@ -1022,6 +1101,9 @@ export default function Editor() {
             <IconBtn title="Хуваах (S)" onClick={actions.split}>
               <Scissors className="h-4 w-4" />
             </IconBtn>
+            <IconBtn title="Хуваасан хэсгүүдийг нийлүүлэх (⇧S)" onClick={() => actions.join()}>
+              <Combine className="h-4 w-4" />
+            </IconBtn>
             <IconBtn title="Хувилах (⌘D)" onClick={actions.duplicate} disabled={!liveSelected.length}>
               <Copy className="h-4 w-4" />
             </IconBtn>
@@ -1048,8 +1130,9 @@ export default function Editor() {
               type="range"
               min={0}
               max={100}
-              value={(Math.log(pps / 2) / Math.log(200)) * 100}
-              onChange={(e) => setPps(2 * Math.pow(200, Number(e.target.value) / 100))}
+              step={0.1}
+              value={(Math.log(pps / MIN_PPS) / Math.log(MAX_PPS / MIN_PPS)) * 100}
+              onChange={(e) => setPps(MIN_PPS * Math.pow(MAX_PPS / MIN_PPS, Number(e.target.value) / 100))}
               className="w-28 accent-zinc-300"
               aria-label="Timeline zoom"
             />
@@ -1217,6 +1300,7 @@ function IconBtn({
 const SHORTCUTS: [string, string][] = [
   ["Space / K", "Тоглуулах / зогсоох"],
   ["S  (⌘B)", "Playhead дээр хуваах (сонгосон эсвэл бүх клип)"],
+  ["⇧ S", "Хуваасан хэсгүүдийг буцааж нийлүүлэх (сонгосон эсвэл playhead дээрх)"],
   ["Delete / ⌫", "Сонгосныг устгах"],
   ["⇧ Delete", "Устгаад зайг хаах (ripple)"],
   ["Хоосон зай → 🗑 / Delete", "Хоосон зайг устгаж клипүүдийг урагшлуулах"],
@@ -1241,6 +1325,7 @@ const SHORTCUTS: [string, string][] = [
   ["+ / − / \\", "Timeline томруулах / жижигрүүлэх / бүтэн"],
   ["Ctrl / ⌘ + scroll, pinch", "Timeline томруулах / жижигрүүлэх (хулганы байрлалд)"],
   ["⇧ + scroll", "Timeline-ийг хажуу тийш гүйлгэх"],
+  ["Track нэр дээр ˄ / ˅", "Давхаргыг урагш / хойш (⇧: хамгийн урд / ард). Right-click → Хамгийн урд гаргах"],
   ["⇧ + click", "Олон клип сонгох"],
   ["Esc", "Сонголт цуцлах"],
 ];

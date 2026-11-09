@@ -1,5 +1,6 @@
 // Timeline project model shared by the editor UI and POST /api/render. No Node imports.
 import type { Crf, Encoder, SourceRef } from "@/lib/editor-options";
+import type { Transition } from "@/lib/transitions";
 
 export const FPS = 30;
 export const MIN_CLIP = 0.1; // seconds
@@ -43,6 +44,17 @@ export type Track = { id: string; kind: TrackKind; muted: boolean; hidden: boole
 
 export type Crop = { l: number; r: number; t: number; b: number }; // fractions of the source frame
 
+/** Card drawn behind a video/picture clip (e.g. a logo on a rounded panel). */
+export type ClipFrame = {
+  color: string; // #rrggbb
+  /** Background opacity 0–1; 0 = no card, only the rounded corners. */
+  opacity: number;
+  /** Space around the picture, as a fraction of the picture's short side. */
+  padding: number;
+  /** Corner radius as a fraction of the card's short side (0.5 = pill / circle). */
+  radius: number;
+};
+
 export type MediaClip = {
   id: string;
   trackId: string;
@@ -69,6 +81,9 @@ export type MediaClip = {
   flipV: boolean;
   opacity: number;
   crop: Crop;
+  /** Transition from the video clip that ends where this one starts on the same track. */
+  transition?: Transition;
+  frame?: ClipFrame;
 };
 
 export const TEXT_STYLES = ["box", "outline", "plain"] as const;
@@ -224,3 +239,15 @@ export function coverScale(srcW: number, srcH: number, clip: Pick<MediaClip, "cr
 }
 
 export const TEXT_LINE_HEIGHT = 1.25;
+
+/**
+ * Card around a picture box of w×h (any unit): padding on every side, the card's corner radius,
+ * and the picture's own radius so its corners follow the card's.
+ */
+export function frameGeometry(w: number, h: number, frame: ClipFrame | undefined): { pad: number; outerR: number; innerR: number; hasBg: boolean } {
+  if (!frame) return { pad: 0, outerR: 0, innerR: 0, hasBg: false };
+  const hasBg = frame.opacity > 0;
+  const pad = hasBg ? frame.padding * Math.min(w, h) : 0;
+  const outerR = frame.radius * Math.min(w, h) + (hasBg ? frame.radius * 2 * pad : 0);
+  return { pad, outerR, innerR: Math.max(0, outerR - pad), hasBg };
+}
