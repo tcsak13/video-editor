@@ -1,5 +1,7 @@
 // Re-checks a timeline project that came from the browser (render + templates). No UI imports.
 import {
+  CLIP_ASPECT_MAX,
+  CLIP_ASPECT_MIN,
   MIN_CLIP,
   ROTATIONS,
   TEXT_STYLES,
@@ -110,6 +112,7 @@ export function sanitizeProject(raw: unknown): Project | string {
           radius: num(fr.radius, 0, 0.5, 0.2),
         };
       }
+      if (c.type === "video" && typeof m.aspect === "number" && m.aspect >= CLIP_ASPECT_MIN && m.aspect <= CLIP_ASPECT_MAX) clip.aspect = m.aspect;
       const tr = m.transition as Partial<Transition> | undefined;
       if (c.type === "video" && tr && TRANSITION_TYPES.includes(tr.type as Transition["type"])) {
         clip.transition = { type: tr.type as Transition["type"], duration: num(tr.duration, 0.1, 4, 0.5) };

@@ -12,6 +12,7 @@ import {
   type Track,
   type TrackKind,
   visualSize,
+  sourceSize,
 } from "@/lib/timeline";
 import type { Transition } from "@/lib/transitions";
 import { mediaDuration, type MediaItem } from "./media";
@@ -22,7 +23,8 @@ const EPS = 1e-3;
 export function fitCanvasToClip(p: Project, clipId: string, src: { width: number | null; height: number | null }): Project {
   const clip = p.clips.find((c): c is MediaClip => c.id === clipId && c.type === "video");
   if (!clip || !src.width || !src.height) return p;
-  const v = visualSize(src.width, src.height, clip.crop, clip.rotate);
+  const s = sourceSize(src, clip);
+  const v = visualSize(s.w, s.h, clip.crop, clip.rotate);
   return {
     ...p,
     aspect: aspectFromSize(v.w, v.h),
@@ -464,6 +466,8 @@ export function replaceClipMedia(
       in: inPt,
       out,
       audioDetached: c.type === "video" && c.audioDetached && keepAudio,
+      // A shape fix belonged to the old file's stretch.
+      aspect: undefined,
     });
   }
 

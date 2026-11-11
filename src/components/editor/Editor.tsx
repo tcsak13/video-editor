@@ -50,6 +50,7 @@ import {
   FPS,
   clipEnd,
   coverScale,
+  sourceSize,
   nearestAspect,
   projectDuration,
   type CanvasAspect,
@@ -877,7 +878,7 @@ export default function Editor() {
             label: "Дүүргэх",
             icon: Expand,
             onSelect: () =>
-              patchClip(pic.id, { scale: coverScale(picInfo?.width ?? 16, picInfo?.height ?? 9, pic, project.aspect), x: 0.5, y: 0.5 }),
+              patchClip(pic.id, { scale: coverScale(sourceSize(picInfo, pic).w, sourceSize(picInfo, pic).h, pic, project.aspect), x: 0.5, y: 0.5 }),
           },
           { label: "Канвасыг контентод тааруулах", icon: Fullscreen, shortcut: "F", onSelect: () => fitCanvas(pic.id) },
           { label: "90° эргүүлэх", icon: RotateCw, onSelect: () => patchClip(pic.id, { rotate: ((pic.rotate + 90) % 360) as Rotation }) },

@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { MediaInfo } from "@/lib/editor-options";
-import { CONVERT_QUALITIES, convertedName, VIDEO_RE, type ConvertFile, type ConvertOptions, type ConvertPlan, type ConvertQuality } from "@/lib/convert";
+import { ASPECT_MAX, ASPECT_MIN, CONVERT_QUALITIES, convertedName, VIDEO_RE, type ConvertFile, type ConvertOptions, type ConvertPlan, type ConvertQuality } from "@/lib/convert";
 import { frameSize, parseMediaInfo, runCapture } from "@/lib/server/ffmpeg";
 import { mapLimit } from "@/lib/server/merge";
 import { normalizeLocalPath } from "@/lib/server/storage";
@@ -38,6 +38,11 @@ async function probeForConvert(file: string, st: { mtimeMs: number; size: number
   };
   probeCache.set(file, { mtimeMs: st.mtimeMs, size: st.size, probe });
   return probe;
+}
+
+/** The frame stretched to `aspect` by growing one side, so no detail is thrown away before the final resize. */
+function reshaped(w: number, h: number, aspect: number): [number, number] {
+  return aspect >= w / h ? [h * aspect, h] : [w, w / aspect];
 }
 
 const SKIP_DIRS = new Set(["$RECYCLE.BIN", "System Volume Information", "node_modules"]);
@@ -81,7 +86,7 @@ export type PlanSources = Map<string, { file: string; dest: string; probe: Conve
  * `out/<folder name>/<same sub-folders>/<same name>.mp4`. H.264 that is already small enough keeps
  * its picture untouched when `copyFit` is on; everything else is re-encoded to `quality`.
  */
-export async function planConvert({ sources, files: singles, out, quality, copyFit }: ConvertOptions): Promise<ConvertPlan & { sources: PlanSources }> {
+export async function planConvert({ sources, files: singles, out, quality, copyFit, aspect }: ConvertOptions): Promise<ConvertPlan & { sources: PlanSources }> {
   // A folder inside another chosen folder would list the same films twice.
   const roots = [...new Set(sources)].filter((s, _, all) => !all.some((o) => o !== s && inside(s, o)));
   const rootNames = new Map<string, string>();
@@ -144,7 +149,7 @@ export async function planConvert({ sources, files: singles, out, quality, copyF
       const fits = Math.min(w, h) <= target;
       // The picture is copied as is; sound that isn't AAC is still re-encoded (cheap).
       const copyable = info?.videoCodec === "h264" && probe.plain420;
-      action = copyFit && fits && copyable ? "copy" : "encode";
+      action = copyFit && fits && copyable && !aspect ? "copy" : "encode";
       planned.set(key, { file, dest, probe });
     }
     files.push({
@@ -158,7 +163,7 @@ export async function planConvert({ sources, files: singles, out, quality, copyF
       height: h,
       videoCodec: info?.videoCodec ?? null,
       action,
-      outSize: action === "encode" && w && h ? frameSize(w, h, target) : null,
+      outSize: action === "encode" && w && h ? (aspect ? frameSize(...reshaped(w, h, aspect), target) : frameSize(w, h, target)) : null,
       problem,
       exists: await exists(dest),
     });
@@ -186,5 +191,6 @@ export async function readConvertOptions(body: unknown): Promise<ConvertOptions 
     out: normalizeLocalPath(b.out),
     quality: CONVERT_QUALITIES.includes(b.quality as ConvertQuality) ? (b.quality as ConvertQuality) : "1080",
     copyFit: b.copyFit !== false,
+    aspect: typeof b.aspect === "number" && b.aspect >= ASPECT_MIN && b.aspect <= ASPECT_MAX ? b.aspect : null,
   };
 }

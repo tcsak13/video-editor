@@ -16,6 +16,7 @@ import {
   RotateCw,
   Shrink,
   SquareRoundCorner,
+  StretchVertical,
   Trash2,
   Type,
   Unlink,
@@ -30,12 +31,15 @@ import { MEDIA_ACCEPT } from "@/lib/editor-options";
 import { cssFontFamily } from "@/lib/fonts";
 import {
   MAX_CROP,
+  ASPECT_PRESETS,
   NO_CROP,
+  aspectLabel,
   SPEED_OPTIONS,
   TEXT_STYLES,
   canvasSize,
   clipDuration,
   coverScale,
+  sourceSize,
   type Clip,
   type ClipFrame,
   type MediaClip,
@@ -409,8 +413,7 @@ function MediaClipPanel({ clip, media, project, patchClip, onDetach, onDelete, o
   const isVideo = clip.type === "video";
   const tab = isVideo && (still || sub === "video") ? "video" : "audio";
   const set = (patch: Partial<MediaClip>, key?: string) => patchClip(clip.id, patch, key ? `${key}:${clip.id}` : undefined);
-  const srcW = media?.info?.width ?? 16;
-  const srcH = media?.info?.height ?? 9;
+  const { w: srcW, h: srcH } = sourceSize(media?.info, clip);
   const hasAudio = !!media?.info?.hasAudio;
 
   return (
@@ -473,6 +476,8 @@ function MediaClipPanel({ clip, media, project, patchClip, onDetach, onDelete, o
             <Slider label="X" value={clip.x * 100} min={-50} max={150} unit="%" onChange={(v) => set({ x: v / 100 }, "x")} />
             <Slider label="Y" value={clip.y * 100} min={-50} max={150} unit="%" onChange={(v) => set({ y: v / 100 }, "y")} />
           </Section>
+
+          <AspectSection clip={clip} media={media} set={set} />
 
           <Section icon={CropIcon} title="Тайрах (Crop)" onReset={() => set({ crop: NO_CROP })}>
             <button
@@ -610,6 +615,56 @@ function FrameSection({ clip, set }: { clip: MediaClip; set: (p: Partial<MediaCl
           <Slider label="Булан" value={fr.radius * 100} min={0} max={50} unit="%" onChange={(v) => patch({ radius: v / 100 }, "frame-radius")} />
         </>
       )}
+    </Section>
+  );
+}
+
+/** Fixes a film stretched to the wrong frame (people too wide or too thin) by showing its frame at another shape. */
+function AspectSection({ clip, media, set }: { clip: MediaClip; media: MediaItem | undefined; set: (p: Partial<MediaClip>, key?: string) => void }) {
+  const w = media?.info?.width;
+  const h = media?.info?.height;
+  if (!w || !h) return null;
+  const native = w / h;
+  const shape = clip.aspect ?? native;
+  const height = Math.round((native / shape) * 100);
+  const near = (a: number, b: number) => Math.abs(a - b) < 0.005;
+  return (
+    <Section icon={StretchVertical} title="Харьцаа засах" onReset={() => set({ aspect: undefined })}>
+      <div className="grid grid-cols-3 gap-1">
+        {[{ label: "Эх хэвээр", value: undefined as number | undefined }, ...ASPECT_PRESETS].map((p) => {
+          const on = p.value === undefined ? clip.aspect === undefined : clip.aspect !== undefined && near(clip.aspect, p.value);
+          return (
+            <button
+              key={p.label}
+              type="button"
+              onClick={() => set({ aspect: p.value === undefined || near(p.value, native) ? undefined : p.value })}
+              className={cx(
+                "rounded-lg border py-1.5 text-xs transition",
+                on ? "border-violet-500 bg-violet-500/20 text-white" : "border-zinc-800 text-zinc-400 hover:border-zinc-600",
+              )}
+            >
+              {p.label}
+            </button>
+          );
+        })}
+      </div>
+      <Slider
+        label="Өндөр — нүүр, бие хэвийн харагдтал"
+        value={height}
+        min={50}
+        max={170}
+        unit="%"
+        onChange={(v) => set({ aspect: Math.abs(v - 100) < 0.5 ? undefined : native / (v / 100) }, "aspect")}
+      />
+      <p className="text-[11px] text-zinc-500">
+        {clip.aspect ? (
+          <>
+            Эх {aspectLabel(native)} → <span className="text-violet-300">{aspectLabel(clip.aspect)}</span> болгож харуулна. Export-д ч мөн адил.
+          </>
+        ) : (
+          "Сунасан бичлэгийг засна: хүмүүс бүдүүн, намхан харагдаж байвал ихэвчлэн 4:3 таарна."
+        )}
+      </p>
     </Section>
   );
 }

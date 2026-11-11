@@ -33,8 +33,13 @@ export type ConvertFile = {
 
 export type ConvertPlan = { out: string; files: ConvertFile[] };
 
-/** `sources` are folders read recursively; `files` are single films that land straight in `out`. */
-export type ConvertOptions = { sources: string[]; files: string[]; out: string; quality: ConvertQuality; copyFit: boolean };
+/**
+ * `sources` are folders read recursively; `files` are single films that land straight in `out`.
+ * `aspect` (width / height) fixes a stretched picture: the frame is resized to that shape, null keeps it.
+ */
+export type ConvertOptions = { sources: string[]; files: string[]; out: string; quality: ConvertQuality; copyFit: boolean; aspect: number | null };
+
+export { ASPECT_PRESETS, aspectLabel, CLIP_ASPECT_MAX as ASPECT_MAX, CLIP_ASPECT_MIN as ASPECT_MIN } from "./timeline";
 
 export type ConvertRequest = ConvertOptions & { items: string[] };
 

@@ -8,6 +8,7 @@ import {
   clipEnd,
   cropFromDisplay,
   cropToDisplay,
+  sourceSize,
   type CanvasAspect,
   type Crop,
   type MediaClip,
@@ -48,8 +49,7 @@ export default function CropEditor({
   onApply: (crop: Crop, fitCanvas: boolean) => void;
   onCancel: () => void;
 }) {
-  const srcW = media.info?.width ?? 16;
-  const srcH = media.info?.height ?? 9;
+  const { w: srcW, h: srcH } = sourceSize(media.info, clip);
   const quarter = clip.rotate === 90 || clip.rotate === 270;
   const dispW = quarter ? srcH : srcW;
   const dispH = quarter ? srcW : srcH;

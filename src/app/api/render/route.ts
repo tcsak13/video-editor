@@ -23,6 +23,7 @@ import {
   TEXT_LINE_HEIGHT,
   canvasSize,
   clipBoxSize,
+  sourceSize,
   clipDuration,
   clipEnd,
   frameGeometry,
@@ -189,7 +190,8 @@ function buildPlan(
         if (post > 0) vf.push(`tpad=stop_mode=clone:stop_duration=${f(post)}`);
       }
 
-      const box = clipBoxSize(m.info.width ?? W, m.info.height ?? H, clip, W, H);
+      const src0 = sourceSize(m.info, clip, [W, H]);
+      const box = clipBoxSize(src0.w, src0.h, clip, W, H);
       const bw = even(box.w);
       const bh = even(box.h);
       vf.push(`scale=${bw}:${bh}`, "setsar=1");

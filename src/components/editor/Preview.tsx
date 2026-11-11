@@ -5,6 +5,7 @@ import {
   TEXT_LINE_HEIGHT,
   aspectRatio,
   clipBoxSize,
+  sourceSize,
   clipEnd,
   frameGeometry,
   type Crop,
@@ -239,7 +240,8 @@ export default function Preview({
           const m = media.get(clip.mediaId);
           const url = m ? playableUrl(m) : null;
           if (m?.placeholder && m.info && clip.type === "video") {
-            const box = clipBoxSize(m.info.width ?? 16, m.info.height ?? 9, clip, cw, ch);
+            const src = sourceSize(m.info, clip);
+            const box = clipBoxSize(src.w, src.h, clip, cw, ch);
             return (
               <div
                 key={clip.id}
@@ -279,8 +281,7 @@ export default function Preview({
             );
           }
 
-          const srcW = m.info.width ?? 16;
-          const srcH = m.info.height ?? 9;
+          const { w: srcW, h: srcH } = sourceSize(m.info, clip);
           const box = clipBoxSize(srcW, srcH, clip, cw, ch);
           const quarter = clip.rotate === 90 || clip.rotate === 270;
           const innerW = quarter ? box.h : box.w;
@@ -451,7 +452,8 @@ function SelectionBox({
 }) {
   const t = useClockTime(clock);
   if (!media?.info || t < clip.start || t >= clipEnd(clip)) return null;
-  const box = clipBoxSize(media.info.width ?? 16, media.info.height ?? 9, clip, cw, ch);
+  const src = sourceSize(media.info, clip);
+  const box = clipBoxSize(src.w, src.h, clip, cw, ch);
   const corners = [
     ["-left-1.5 -top-1.5", "cursor-nwse-resize"],
     ["-right-1.5 -top-1.5", "cursor-nesw-resize"],

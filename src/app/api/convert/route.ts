@@ -7,7 +7,7 @@ import { availableEncoders, legacyInputFlags, probeMedia, resolveEncoder, runFfm
 import { planConvert, readConvertOptions, type ConvertProbe } from "@/lib/server/convert";
 import { jsonError, rejectNonLocal } from "@/lib/server/storage";
 
-type Job = { item: ConvertFile; file: string; dest: string; probe: ConvertProbe };
+type Job = { item: ConvertFile; file: string; dest: string; probe: ConvertProbe; aspect: number | null };
 
 const ENCODER_LABEL: Record<Exclude<Encoder, "auto">, string> = { cpu: "CPU (libx264)", nvenc: "NVIDIA NVENC", videotoolbox: "Apple VideoToolbox" };
 
@@ -34,13 +34,14 @@ function copyArgs(job: Job, tmp: string): string[] {
  */
 function encodeArgs(job: Job, encoder: Exclude<Encoder, "auto">, tmp: string): string[] {
   const [w, h] = job.item.outSize!;
-  const same = job.item.width === w && job.item.height === h;
+  const same = job.item.width === w && job.item.height === h && !job.aspect;
   return [
     ...(encoder === "videotoolbox" ? ["-hwaccel", "videotoolbox"] : []),
     ...legacyInputFlags(job.file),
     "-i", job.file,
     "-map", "0:v:0", "-map", "0:a?",
-    "-vf", `${same ? "" : `scale=${w}:${h}:flags=bicubic,`}format=yuv420p`,
+    // A reshaped frame gets square pixels, or players would undo the fix from the old aspect flag.
+    "-vf", `${same ? "" : `scale=${w}:${h}:flags=bicubic,`}${job.aspect ? "setsar=1," : ""}format=yuv420p`,
     ...videoCodecArgs(encoder, 20),
     ...audioArgs(job.probe),
     ...tail, "-y", tmp,
@@ -77,7 +78,7 @@ export async function POST(request: Request) {
     const src = typeof key === "string" ? plan.sources.get(key) : undefined;
     if (!item) return jsonError("Файлын жагсаалт өөрчлөгдсөн байна. Дахин шалгана уу.", 409);
     if (item.problem || !src) return jsonError(`${item.source}: ${item.problem ?? "хөрвүүлэх боломжгүй"}`);
-    jobs.push({ item, ...src });
+    jobs.push({ item, ...src, aspect: options.aspect });
   }
 
   // A GPU encoder that fails to start falls back to the CPU, as in the editor's export.

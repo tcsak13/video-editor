@@ -81,6 +81,8 @@ export type MediaClip = {
   flipV: boolean;
   opacity: number;
   crop: Crop;
+  /** Shape (width / height) the source frame is shown at, fixing a film stretched to the wrong frame; unset = as stored. */
+  aspect?: number;
   /** Transition from the video clip that ends where this one starts on the same track. */
   transition?: Transition;
   frame?: ClipFrame;
@@ -207,6 +209,33 @@ export function cropFromDisplay(d: Crop, rotate: Rotation, flipH: boolean, flipV
   if (rotate === 180) return { l: d.r, t: d.b, r: d.l, b: d.t };
   if (rotate === 270) return { l: d.b, t: d.l, r: d.t, b: d.r };
   return { ...d };
+}
+
+export const CLIP_ASPECT_MIN = 0.3;
+export const CLIP_ASPECT_MAX = 4;
+
+/** Shapes films are usually meant to have, for fixing ones stretched to the wrong frame. */
+export const ASPECT_PRESETS = [
+  { label: "4:3", value: 4 / 3 },
+  { label: "3:2", value: 3 / 2 },
+  { label: "16:9", value: 16 / 9 },
+  { label: "1.85:1", value: 1.85 },
+  { label: "2.39:1", value: 2.39 },
+] as const;
+
+export function aspectLabel(aspect: number): string {
+  return ASPECT_PRESETS.find((p) => Math.abs(p.value - aspect) < 0.005)?.label ?? `${aspect.toFixed(2)}:1`;
+}
+
+/** Source frame size as the clip shows it: `clip.aspect` reshapes a stretched picture, keeping its height. */
+export function sourceSize(
+  info: { width: number | null; height: number | null } | null | undefined,
+  clip: Pick<MediaClip, "aspect">,
+  fallback: [number, number] = [16, 9],
+): { w: number; h: number } {
+  const w = info?.width ?? fallback[0];
+  const h = info?.height ?? fallback[1];
+  return { w: clip.aspect ? h * clip.aspect : w, h };
 }
 
 /** Size of the clip's picture after crop and rotation, in source pixels. */

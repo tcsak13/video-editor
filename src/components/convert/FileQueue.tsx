@@ -3,7 +3,7 @@
 import { AlertTriangle, CheckCircle2, FileVideo, Loader2, SkipForward, X, XCircle } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { cx } from "@/components/editor/store";
-import { convertedName, type ConvertEvent, type ConvertQuality, type ConvertRequest } from "@/lib/convert";
+import { aspectLabel, convertedName, type ConvertEvent, type ConvertQuality, type ConvertRequest } from "@/lib/convert";
 import type { FsFile } from "@/lib/merge";
 import { fmtSize } from "./format";
 
@@ -18,6 +18,7 @@ export type QueueItem = {
   out: string;
   quality: ConvertQuality;
   copyFit: boolean;
+  aspect: number | null;
   state: State;
   percent: number;
   speed: number | null;
@@ -58,7 +59,15 @@ export function useFileQueue() {
       const controller = new AbortController();
       aborts.current.set(item.id, controller);
       update(item.id, { state: "running", percent: 0 });
-      const body: ConvertRequest = { sources: [], files: [item.path], out: item.out, quality: item.quality, copyFit: item.copyFit, items: [convertedName(item.name)] };
+      const body: ConvertRequest = {
+        sources: [],
+        files: [item.path],
+        out: item.out,
+        quality: item.quality,
+        copyFit: item.copyFit,
+        aspect: item.aspect,
+        items: [convertedName(item.name)],
+      };
       try {
         const res = await fetch("/api/convert", {
           method: "POST",
@@ -115,7 +124,7 @@ export function useFileQueue() {
 
   /** Adds a file and starts it right away when a slot is free. */
   const add = useCallback(
-    (file: FsFile, settings: Pick<QueueItem, "out" | "quality" | "copyFit">) => {
+    (file: FsFile, settings: Pick<QueueItem, "out" | "quality" | "copyFit" | "aspect">) => {
       const live = itemsRef.current.filter((it) => it.state !== "failed" && it.state !== "cancelled");
       if (live.some((it) => it.path === file.path && it.out === settings.out)) return;
       const outName = convertedName(file.name).toLowerCase();
@@ -216,7 +225,7 @@ export function FileQueueList({ queue }: { queue: ReturnType<typeof useFileQueue
                 {convertedName(it.name) !== it.name && <span className="ml-2 text-xs text-zinc-600">{it.name}</span>}
               </div>
               <div className="truncate font-mono text-[11px] text-zinc-600" title={it.outPath ?? it.out}>
-                {it.quality}p → {it.outPath ?? it.out}
+                {it.quality}p{it.aspect ? <span className="text-violet-300"> · {aspectLabel(it.aspect)} болгож засна</span> : null} → {it.outPath ?? it.out}
               </div>
             </div>
             <span className="relative w-24 shrink-0 text-right font-mono text-xs text-zinc-500">

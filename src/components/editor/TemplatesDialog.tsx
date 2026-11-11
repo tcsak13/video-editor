@@ -2,7 +2,7 @@
 
 import { BookmarkPlus, Check, LayoutTemplate, Loader2, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
-import { aspectRatio, clipBoxSize, projectDuration, type Project } from "@/lib/timeline";
+import { aspectRatio, clipBoxSize, projectDuration, sourceSize, type Project } from "@/lib/timeline";
 import { cssFontFamily } from "@/lib/fonts";
 import type { Template } from "@/lib/template";
 import { sourceUrl, type MediaItem } from "./media";
@@ -296,7 +296,8 @@ function TemplateThumb({ template }: { template: Template }) {
           const m = media.get(c.mediaId);
           if (!m || c.type !== "video" || seen.has(c.mediaId)) return null;
           seen.add(c.mediaId);
-          const box = clipBoxSize(m.info.width ?? 16, m.info.height ?? 9, c, w, ch);
+          const src = sourceSize(m.info, c);
+          const box = clipBoxSize(src.w, src.h, c, w, ch);
           const style = { left: c.x * w - box.w / 2, top: c.y * ch - box.h / 2, width: box.w, height: box.h, opacity: c.opacity };
           if (m.placeholder) return <div key={c.id} className="absolute border border-dashed border-violet-400/80 bg-violet-900/40" style={style} />;
           if (m.info.isImage && m.source) {

@@ -1,13 +1,14 @@
 "use client";
 
-import { AlertTriangle, CheckCircle2, Clapperboard, FilePlus2, FolderOpen, FolderPlus, HardDrive, Loader2, RefreshCw, SkipForward, X, XCircle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Clapperboard, FilePlus2, FolderOpen, FolderPlus, HardDrive, Loader2, RefreshCw, ScanEye, SkipForward, X, XCircle } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { cx } from "@/components/editor/store";
 import FolderPicker, { FolderField } from "@/components/merge/FolderPicker";
+import AspectDialog from "./AspectDialog";
 import { FileQueueList, useFileQueue } from "./FileQueue";
 import { fmtDur, fmtEta, fmtSize } from "./format";
-import { CONVERT_QUALITIES, type ConvertEvent, type ConvertFile, type ConvertOptions, type ConvertPlan, type ConvertQuality, type ConvertRequest } from "@/lib/convert";
+import { ASPECT_PRESETS, aspectLabel, CONVERT_QUALITIES, type ConvertEvent, type ConvertFile, type ConvertOptions, type ConvertPlan, type ConvertQuality, type ConvertRequest } from "@/lib/convert";
 
 const STORAGE_KEY = "lve-convert-v1";
 
@@ -34,6 +35,9 @@ export default function ConvertTool() {
   const [out, setOut] = useState(saved.out ?? "");
   const [quality, setQuality] = useState<ConvertQuality>(CONVERT_QUALITIES.includes(saved.quality!) ? saved.quality! : "1080");
   const [copyFit, setCopyFit] = useState(saved.copyFit !== false);
+  // Not remembered: a fix for one stretched film shouldn't quietly reshape the next visit's films.
+  const [aspect, setAspect] = useState<number | null>(null);
+  const [aspectDialog, setAspectDialog] = useState(false);
   const [mode, setMode] = useState<Mode>(saved.mode === "files" ? "files" : "folders");
   const [fileDir, setFileDir] = useState(saved.fileDir ?? "");
   const [picker, setPicker] = useState<"add" | "out" | "file" | null>(null);
@@ -96,7 +100,7 @@ export default function ConvertTool() {
     }
   };
 
-  const options: ConvertOptions = { sources, files: [], out, quality, copyFit };
+  const options: ConvertOptions = { sources, files: [], out, quality, copyFit, aspect };
   const replan = (patch: Partial<ConvertOptions>) => {
     if (mode === "folders" && (plan || patch.sources || patch.out)) runPlan({ ...options, ...patch });
   };
@@ -348,8 +352,49 @@ export default function ConvertTool() {
           </p>
         </div>
 
+        <div className="mt-4">
+          <div className="mb-2 text-xs font-semibold uppercase tracking-wider text-zinc-500">4. Харьцаа засах (сунасан бичлэг)</div>
+          <div className="flex flex-wrap gap-2">
+            {[{ label: "Эх хэвээр", value: null as number | null }, ...ASPECT_PRESETS].map((p) => (
+              <button
+                key={p.label}
+                type="button"
+                disabled={busy}
+                onClick={() => {
+                  setAspect(p.value);
+                  replan({ aspect: p.value });
+                }}
+                className={cx(
+                  "rounded-xl border px-3.5 py-1.5 text-sm transition disabled:opacity-50",
+                  (p.value === null ? aspect === null : aspect !== null && Math.abs(aspect - p.value) < 0.005)
+                    ? "border-violet-500 bg-violet-500/15 text-white"
+                    : "border-zinc-800 bg-zinc-950 text-zinc-300 hover:border-zinc-600",
+                )}
+              >
+                {p.label}
+              </button>
+            ))}
+            {aspect !== null && !ASPECT_PRESETS.some((p) => Math.abs(p.value - aspect) < 0.005) && (
+              <span className="rounded-xl border border-violet-500 bg-violet-500/15 px-3.5 py-1.5 text-sm text-white">{aspectLabel(aspect)}</span>
+            )}
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => setAspectDialog(true)}
+              className="flex items-center gap-1.5 rounded-xl bg-zinc-800 px-3.5 py-1.5 text-sm text-zinc-100 transition hover:bg-zinc-700 disabled:opacity-50"
+            >
+              <ScanEye className="h-4 w-4 text-violet-300" /> Харж тохируулах…
+            </button>
+          </div>
+          <p className={cx("mt-1.5 text-xs", aspect ? "text-amber-300" : "text-zinc-600")}>
+            {aspect
+              ? `${mode === "files" ? "Цаашид нэмэх" : "Сонгосон"} бүх киноны дүрсийг ${aspectLabel(aspect)} хэлбэрт оруулна. Зөвхөн сунасан кинонд хэрэглээрэй.`
+              : "Хүмүүс бүдүүн, намхан эсвэл хэт нарийн харагдаж байвал зөв хэлбэрийг нь сонгоно (ихэвчлэн 4:3). «Харж тохируулах»-аар кадрыг нь харж тааруулна."}
+          </p>
+        </div>
+
         <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
-          <label className={cx("flex cursor-pointer items-center gap-2 text-sm text-zinc-300", busy && "pointer-events-none opacity-50")}>
+          <label className={cx("flex cursor-pointer items-center gap-2 text-sm text-zinc-300", (busy || aspect !== null) && "pointer-events-none opacity-50")}>
             <input
               type="checkbox"
               checked={copyFit}
@@ -494,6 +539,29 @@ export default function ConvertTool() {
         </div>
       )}
 
+      {aspectDialog && (
+        <AspectDialog
+          initialFile={null}
+          initialDir={fileDir || sources[0] || ""}
+          initialAspect={aspect}
+          quality={quality}
+          onConvert={
+            mode === "files" && out
+              ? (f, a) => {
+                  setAspectDialog(false);
+                  queue.add(f, { out, quality, copyFit, aspect: a });
+                }
+              : undefined
+          }
+          onApplyAll={(a) => {
+            setAspectDialog(false);
+            setAspect(a);
+            replan({ aspect: a });
+          }}
+          onClose={() => setAspectDialog(false)}
+        />
+      )}
+
       {picker === "file" && (
         <FolderPicker
           title="Хөрвүүлэх кино сонгох"
@@ -502,7 +570,7 @@ export default function ConvertTool() {
           onClose={() => setPicker(null)}
           onPickFile={(f) => {
             setFileDir(f.path.slice(0, Math.max(f.path.lastIndexOf("/"), f.path.lastIndexOf("\\")) + 1) || f.path);
-            queue.add(f, { out, quality, copyFit });
+            queue.add(f, { out, quality, copyFit, aspect });
           }}
         />
       )}
